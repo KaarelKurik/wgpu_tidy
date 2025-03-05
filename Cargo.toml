@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+wgpu = "24.0"
+encase = "0.10"
+winit = "0.30"
+pollster = "0"
+self_cell = "1"
+bytemuck = "1"
+slang = { git = "https://github.com/FloatyMonkey/slang-rs.git" }
