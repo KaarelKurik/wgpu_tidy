@@ -80,11 +80,27 @@ func fragpos_to_ray(camera: Camera, pos: float2)->TR3 {
     return TR3(camera.centre, ray);
 }
 
+func global_point_to_camera(c: Camera, g: float3)->float3 {
+    return mul(c.frame_inv, g - c.centre);
+}
+
+func camera_point_to_global(c: Camera, l: float3)->float3 {
+    return mul(c.frame, l) + c.centre;
+}
+
+func global_vec_to_camera(c: Camera, gv: float3)->float3 {
+    return mul(c.frame_inv, gv);
+}
+
+func camera_vec_to_global(c: Camera, lv: float3)->float3 {
+    return mul(c.frame, lv);
+}
+
 func direct_render_hermite(c: Camera, h: Hermite, pos: float2)->float4 {
     let a = h.pos;
     let b = a + h.normal;
-    let la = mul(c.frame_inv, a);
-    let lb = mul(c.frame_inv, b);
+    let la = global_point_to_camera(c, a);
+    let lb = global_point_to_camera(c, b);
     // Not dealing with the camera plane intersection case right now
     if (la.z <= 0 || lb.z <= 0) {
         return float4(0);

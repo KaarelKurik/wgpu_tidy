@@ -1,7 +1,7 @@
 use std::{collections::HashMap, io::Write};
 
 use slang::{Downcast};
-use wgpu_tidy::{reflection::{print_var_layout, print_var_tree, var_tree, walk_increment_print, DescriptorTableSlotOffset, SimpleOffset, SubEROffset}, AppState};
+use wgpu_tidy::reflection::{walk_him_down, Cursor};
 use winit::event_loop::{self, EventLoop};
 
 fn main() {
@@ -51,13 +51,7 @@ fn main() {
     let global_type_layout = reflection.global_params_type_layout();
 	let global_var_layout = reflection.global_params_var_layout();
 
-	let mut entries = HashMap::new();
-    wgpu_tidy::reflection::layout_entries_wowee(global_type_layout,&mut entries,0,0);
-
-	println!("{:?}", entries);
-	print_var_layout(global_var_layout);
-	walk_increment_print(global_var_layout, wgpu_tidy::reflection::Offset::DescriptorTableSlotOffset(DescriptorTableSlotOffset::default()));
-
+	walk_him_down(global_var_layout, Cursor::fresh(global_type_layout));
 	
 	let mut file = std::fs::File::create("filename.wgsl").unwrap();
 	file.write_all(shader_bytecode.as_slice()).unwrap();
