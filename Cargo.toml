@@ -1,13 +1,14 @@
 [package]
 name = "wgpu_tidy"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-wgpu = "24.0"
+wgpu = "24"
 encase = "0.10"
 winit = "0.30"
 pollster = "0"
-self_cell = "1"
+ouroboros = "0"
+cgmath = "0"
 bytemuck = "1"
 slang = { git = "https://github.com/FloatyMonkey/slang-rs.git" }
