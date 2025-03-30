@@ -32,7 +32,7 @@ func wendland(no_diff h: float, x: float) -> float {
     }
 }
 
-// TOOD: actual metric
+// TODO: actual metric
 func metric(pos: float3)->float3x3 {
     return float3x3(float3(1.0, 0.0, 0.0), float3(0.0, 1.0, 0.0), float3(0.0, 0.0, 1.0));
 }
@@ -57,17 +57,35 @@ func surface_energy(no_diff sp: SurfaceParams, x: float3)-> float {
     return dot(lc.normal, x - lc.pos);
 }
 
+// Main idea: we're using Newton's method for improving lambda.
+// By taking grad at the new base point that was nudged
+// along a line closer to the zero surface, we hopefully get an improved
+// direction too.
+// Derivation proceeds from thinking about f(x-lambda delta) as a function of lambda.
 func project_onto_surface(no_diff sp: SurfaceParams, x: float3)->float3 {
     let KSTEPS = 10;
     var lambda : float = 0;
     var yPair : DifferentialPair<float3> = diffPair(x, 0);
     bwd_diff(surface_energy)(sp, yPair, 1.0);
+    // Invariant: yPair.v approx to basepoint, yPair.d approx to grad f at basepoint
+    // x - lambda * yPair.d approx basepoint
     for (int k = 0; k < KSTEPS; ++k) {
         yPair = diffPair(x - lambda * yPair.d, yPair.d);
-        bwd_diff(surface_energy)(sp, yPair, rcp(dot(yPair.d, yPair.d)));
-        lambda += surface_energy(sp, x);
+        bwd_diff(surface_energy)(sp, yPair, 1.0);
+        lambda += surface_energy(sp, yPair.v)/dot(yPair.d, yPair.d);
     }
     return yPair.v;
+}
+
+func base_and_delta(no_diff sp: SurfaceParams, x: float3)->TR3 {
+    let base = project_onto_surface(sp, x);
+    return TR3(base, x - base);
+}
+
+func transition_point(no_diff sp: SurfaceParams, no_diff outer_length: float, x: float3)->float3 {
+    let bd = base_and_delta(sp, x);
+    let new_delta = (outer_length - length(bd.v)) * normalize(bd.v);
+    return bd.q + new_delta;
 }
 
 func fragpos_to_ray(camera: Camera, pos: float2)->TR3 {

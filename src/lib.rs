@@ -1030,7 +1030,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
             frame: Matrix3::identity(),
             frame_inv: Matrix3::identity(),
             centre: Vector3::new(0.0, 0.0, -5.0),
-            yfov: PI / 4.0,
+            yfov: PI / 3.0,
         };
 
         let point_data = StructuredBuffer(circle(9));
