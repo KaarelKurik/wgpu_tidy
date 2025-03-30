@@ -5,26 +5,34 @@ pub mod reflection;
 use std::{
     collections::HashMap,
     f32::consts::{PI, TAU},
+    path::Path,
     pin::Pin,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
-use cgmath::{Basis3, Matrix3, Rad, Rotation, Rotation3, SquareMatrix, Vector3};
+use cgmath::{
+    Array, Basis3, InnerSpace, Matrix3, Rad, Rotation, Rotation3, SquareMatrix, Vector3, Zero,
+};
 use encase::{
     ShaderType,
     internal::{BufferMut, WriteInto},
 };
+use image::{EncodableLayout, ImageError, RgbaImage};
+use proc_macros::Writable;
 use reflection::{
-    base_layout_entries, bind_group_entries_from_layout, buffers_from_layout, Cursor, Writable
+    BindingResources, Cursor, Writable, base_layout_entries, bind_group_entries_from_layout,
+    buffers_from_layout,
 };
 use slang::Downcast;
-use wgpu::*;
+use wgpu::{*};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::WindowEvent,
+    event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
-    window::{Window, WindowId},
+    keyboard::{KeyCode, PhysicalKey},
+    window::{CursorGrabMode, Window, WindowId},
 };
 
 struct Gamma<T: ShaderType + WriteInto> {
@@ -57,6 +65,154 @@ impl<T: ShaderType + WriteInto> GammaT for Gamma<T> {
     }
     fn binding_spot(&self) -> (u32, u32) {
         (self.set, self.binding)
+    }
+}
+
+// Has to have equal resolution on all faces
+struct RgbaSkybox {
+    px: RgbaImage,
+    nx: RgbaImage,
+    py: RgbaImage,
+    ny: RgbaImage,
+    pz: RgbaImage,
+    nz: RgbaImage,
+}
+
+impl RgbaSkybox {
+    fn dimensions(&self) -> (u32, u32) {
+        self.px.dimensions()
+    }
+    fn width(&self) -> u32 {
+        self.px.width()
+    }
+    fn height(&self) -> u32 {
+        self.px.height()
+    }
+    fn extent(&self) -> Extent3d {
+        Extent3d {
+            width: self.width(),
+            height: self.height(),
+            depth_or_array_layers: 6,
+        }
+    }
+    fn texture_format(&self) -> TextureFormat {
+        TextureFormat::Rgba8UnormSrgb
+    }
+    fn descriptor(&self) -> TextureDescriptor {
+        TextureDescriptor {
+            label: None,
+            size: self.extent(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: self.texture_format(),
+            usage: TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        }
+    }
+    fn view_descriptor(&self) -> TextureViewDescriptor {
+        TextureViewDescriptor {
+            dimension: Some(TextureViewDimension::Cube),
+            ..Default::default()
+        }
+    }
+    fn as_bytevec(&self) -> Vec<u8> {
+        [
+            self.px.as_bytes(),
+            self.nx.as_bytes(),
+            self.py.as_bytes(),
+            self.ny.as_bytes(),
+            self.pz.as_bytes(),
+            self.nz.as_bytes(),
+        ]
+        .concat()
+    }
+    fn bytes_per_block(&self) -> u32 {
+        4
+    }
+    fn load_from_path(bg_path: &Path) -> Result<Self, ImageError> {
+        let [px, nx, py, ny, pz, nz]: [Result<_, ImageError>; 6] =
+            ["right", "left", "bottom", "top", "front", "back"]
+                .map(|x| {
+                    let mut im = image::open(bg_path.join(format!("{}.png", x)))?.into_rgba8();
+                    image::imageops::flip_vertical_in_place(&mut im);
+                    Ok(im)});
+        Ok(RgbaSkybox {
+            px: px?,
+            nx: nx?,
+            py: py?,
+            ny: ny?,
+            pz: pz?,
+            nz: nz?,
+        })
+    }
+}
+
+impl Writable for RgbaSkybox {
+    fn write_at_cursor(
+        &self,
+        c: Cursor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        binding_resources: &mut BindingResources,
+    ) {
+        let textures = &mut binding_resources.textures;
+        let texture_views = &mut binding_resources.texture_views;
+        let set_index = c.offset().set();
+        let slot_index = c.offset().slot();
+        if !textures.contains_key(&set_index) {
+            textures.insert(set_index, HashMap::new());
+            texture_views.insert(set_index, HashMap::new());
+        }
+        let tset = binding_resources.textures.get_mut(&set_index).unwrap();
+        let tviewset = binding_resources.texture_views.get_mut(&set_index).unwrap();
+        if !tset.contains_key(&slot_index) {
+            let texture = device.create_texture(&self.descriptor());
+            let texture_view = texture.create_view(&self.view_descriptor());
+            tset.insert(slot_index, texture);
+            tviewset.insert(slot_index, texture_view);
+        } else {
+            let curtex = tset.get_mut(&slot_index).unwrap();
+            if curtex.width() != self.width() || curtex.height() != self.height() {
+                let newtex = device.create_texture(&self.descriptor());
+                let newview = newtex.create_view(&self.view_descriptor());
+                tviewset.insert(slot_index, newview);
+                *curtex = newtex;
+            }
+        }
+        let tex = tset.get_mut(&slot_index).unwrap();
+        queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: Origin3d { x: 0, y: 0, z: 0 },
+                aspect: TextureAspect::All,
+            },
+            &self.as_bytevec(),
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(self.bytes_per_block() * self.width()),
+                rows_per_image: Some(self.height()),
+            },
+            self.extent(),
+        );
+    }
+}
+
+fn describe_skybox(skybox: &RgbaSkybox) -> TextureDescriptor {
+    TextureDescriptor {
+        label: None,
+        size: Extent3d {
+            width: skybox.width(),
+            height: skybox.height(),
+            depth_or_array_layers: 6,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba8UnormSrgb,
+        usage: TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
     }
 }
 
@@ -95,6 +251,7 @@ impl GlobalShaderScope {
     }
 }
 
+#[derive(Writable)]
 struct Camera {
     width: f32,
     height: f32,
@@ -104,26 +261,218 @@ struct Camera {
     yfov: f32,
 }
 
+// impl Writable for Camera {
+//     fn write_at_cursor(
+//         &self,
+//         c: Cursor,
+//         device: &wgpu::Device,
+//         queue: &wgpu::Queue,
+//         binding_resources: &mut BindingResources,
+//     ) {
+//         let width_cursor = c.navigate_field(0).unwrap();
+//         let height_cursor = c.navigate_field(1).unwrap();
+//         let frame_cursor = c.navigate_field(2).unwrap();
+//         let frame_inv_cursor = c.navigate_field(3).unwrap();
+//         let centre_cursor = c.navigate_field(4).unwrap();
+//         let yfov_cursor = c.navigate_field(5).unwrap();
+//         self.width.write_at_cursor(width_cursor, device, queue, binding_resources);
+//         self.height.write_at_cursor(height_cursor, device, queue, binding_resources);
+//         self.frame.write_at_cursor(frame_cursor, device, queue, binding_resources);
+//         self.frame_inv.write_at_cursor(frame_inv_cursor, device, queue, binding_resources);
+//         self.centre.write_at_cursor(centre_cursor, device, queue, binding_resources);
+//         self.yfov.write_at_cursor(yfov_cursor, device, queue, binding_resources);
+//     }
+// }
+
+struct CameraController {
+    q_state: ElementState,
+    e_state: ElementState,
+    w_state: ElementState,
+    s_state: ElementState,
+    a_state: ElementState,
+    d_state: ElementState,
+}
+
+impl CameraController {
+    // TODO: modify this to use the metric
+    fn update_camera(&mut self, camera: &mut Camera, dt: Duration) {
+        const ANGULAR_SPEED: f32 = 1f32;
+        const LINEAR_SPEED: f32 = 8f32;
+        let dt_seconds = dt.as_secs_f32();
+
+        let mut linvel = Vector3::<f32>::zero();
+        let z_linvel = LINEAR_SPEED * Vector3::unit_z();
+        let x_linvel = LINEAR_SPEED * Vector3::unit_x();
+
+        if self.w_state.is_pressed() {
+            linvel += z_linvel;
+        }
+        if self.s_state.is_pressed() {
+            linvel -= z_linvel;
+        }
+        if self.d_state.is_pressed() {
+            linvel += x_linvel;
+        }
+        if self.a_state.is_pressed() {
+            linvel -= x_linvel;
+        }
+        camera.centre += camera.frame * (dt_seconds * linvel);
+        // parallel_transport_camera(donut, camera, linvel, dt_seconds);
+
+        let mut rotvel = Vector3::<f32>::zero();
+        let z_rotvel = ANGULAR_SPEED * Vector3::unit_z();
+
+        if self.q_state.is_pressed() {
+            rotvel -= z_rotvel;
+        }
+        if self.e_state.is_pressed() {
+            rotvel += z_rotvel;
+        }
+        let axis = rotvel.normalize();
+        if axis.is_finite() {
+            camera.frame =
+                camera.frame * Matrix3::from_axis_angle(axis, Rad(dt_seconds * rotvel.magnitude()));
+        }
+        camera.frame_inv = camera.frame.invert().unwrap();
+    }
+    fn process_window_event(&mut self, event: &winit::event::WindowEvent) {
+        match event {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        repeat: false,
+                        state,
+                        ..
+                    },
+                ..
+            } => match code {
+                // TODO: refactor this to have a single source of truth
+                KeyCode::KeyQ => self.q_state = *state,
+                KeyCode::KeyE => self.e_state = *state,
+                KeyCode::KeyW => self.w_state = *state,
+                KeyCode::KeyS => self.s_state = *state,
+                KeyCode::KeyA => self.a_state = *state,
+                KeyCode::KeyD => self.d_state = *state,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    fn process_mouse_motion(&mut self, camera: &mut Camera, delta: &(f64, f64)) {
+        const ANGULAR_SPEED: f32 = 0.001;
+        let dx = delta.0 as f32;
+        let dy = delta.1 as f32;
+        let angle = ANGULAR_SPEED * (dx.powi(2) + dy.powi(2)).sqrt();
+        let axis = Vector3 {
+            x: -dy,
+            y: dx,
+            z: 0.0,
+        }
+        .normalize();
+        camera.frame = camera.frame * Matrix3::from_axis_angle(axis, Rad(angle));
+    }
+}
+
+struct ConstantBuffer<T>(T);
+impl<T: Writable> Writable for ConstantBuffer<T> {
+    fn write_at_cursor(
+        &self,
+        c: Cursor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        binding_resources: &mut BindingResources,
+    ) {
+        let element_cursor = c.navigate_child().unwrap();
+        self.0
+            .write_at_cursor(element_cursor, device, queue, binding_resources);
+    }
+}
+
+struct StructuredBuffer<T>(Vec<T>);
+
+impl<T: Writable> Writable for StructuredBuffer<T> {
+    fn write_at_cursor(
+        &self,
+        c: Cursor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        binding_resources: &mut BindingResources,
+    ) {
+        let total_bytes_needed = (self.0.len())
+            * c.type_layout()
+                .element_type_layout()
+                .stride(slang::ParameterCategory::Uniform);
+        let data_buffer = binding_resources
+            .buffers
+            .get_mut(&c.offset().set())
+            .unwrap()
+            .get_mut(&c.offset().slot())
+            .unwrap();
+        if data_buffer.size() != total_bytes_needed.try_into().unwrap() {
+            *data_buffer = device.create_buffer(&BufferDescriptor {
+                label: None,
+                size: total_bytes_needed.try_into().unwrap(),
+                usage: data_buffer.usage(),
+                mapped_at_creation: false,
+            });
+        }
+        for i in 0..self.0.len() {
+            let element_cursor = c.navigate_index(i as u32).unwrap();
+            self.0[i as usize].write_at_cursor(element_cursor, device, queue, binding_resources);
+        }
+    }
+}
+
 struct TR3 {
     q: Vector3<f32>,
     v: Vector3<f32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Writable)]
 struct Hermite {
     pos: Vector3<f32>,
     normal: Vector3<f32>,
 }
 
+#[derive(Writable)]
 struct SurfaceParams {
     support: f32,
     point_count: i32,
-    point_data: Vec<Hermite>,
+    point_data: StructuredBuffer<Hermite>,
 }
 
+struct DummySampler {}
+
+impl Writable for DummySampler {
+    fn write_at_cursor(
+        &self,
+        c: Cursor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        binding_resources: &mut BindingResources,
+    ) {
+        let set_index = c.offset().set();
+        let slot_index = c.offset().slot();
+        if !binding_resources.samplers.contains_key(&set_index) {
+            binding_resources.samplers.insert(set_index, HashMap::new());
+        }
+        let set = binding_resources.samplers.get_mut(&set_index).unwrap();
+        if !set.contains_key(&slot_index) {
+            set.insert(
+                slot_index,
+                device.create_sampler(&SamplerDescriptor::default()),
+            );
+        }
+    }
+}
+
+#[derive(Writable)]
 struct GraphicsGlobal {
-    camera: Camera,
-    surface: SurfaceParams,
+    camera: ConstantBuffer<Camera>,
+    surface: ConstantBuffer<SurfaceParams>,
+    background: ConstantBuffer<RgbaSkybox>,
+    background_sampler: ConstantBuffer<DummySampler>,
 }
 
 trait ToBytes {
@@ -170,12 +519,13 @@ impl Writable for f32 {
         c: reflection::Cursor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        buffers: &mut HashMap<usize, HashMap<usize, Buffer>>,
+        binding_resources: &mut BindingResources,
     ) {
         let bind_group_ix = c.offset().set();
         let bind_slot_ix = c.offset().slot();
         let uniform_offset = c.offset().uniform();
-        let buffer = buffers
+        let buffer = binding_resources
+            .buffers
             .get(&bind_group_ix)
             .unwrap()
             .get(&bind_slot_ix)
@@ -194,12 +544,13 @@ impl Writable for i32 {
         c: reflection::Cursor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        buffers: &mut HashMap<usize, HashMap<usize, Buffer>>,
+        binding_resources: &mut BindingResources,
     ) {
         let bind_group_ix = c.offset().set();
         let bind_slot_ix = c.offset().slot();
         let uniform_offset = c.offset().uniform();
-        let buffer = buffers
+        let buffer = binding_resources
+            .buffers
             .get(&bind_group_ix)
             .unwrap()
             .get(&bind_slot_ix)
@@ -219,12 +570,13 @@ impl Writable for Vector3<f32> {
         c: reflection::Cursor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        buffers: &mut HashMap<usize, HashMap<usize, Buffer>>,
+        binding_resources: &mut BindingResources,
     ) {
         let bind_group_ix = c.offset().set();
         let bind_slot_ix = c.offset().slot();
         let uniform_offset = c.offset().uniform();
-        let buffer = buffers
+        let buffer = binding_resources
+            .buffers
             .get(&bind_group_ix)
             .unwrap()
             .get(&bind_slot_ix)
@@ -240,12 +592,13 @@ impl Writable for Matrix3<f32> {
         c: reflection::Cursor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        buffers: &mut HashMap<usize, HashMap<usize, Buffer>>,
+        binding_resources: &mut BindingResources,
     ) {
         let bind_group_ix = c.offset().set();
         let bind_slot_ix = c.offset().slot();
         let uniform_offset = c.offset().uniform();
-        let buffer = buffers
+        let buffer = binding_resources
+            .buffers
             .get(&bind_group_ix)
             .unwrap()
             .get(&bind_slot_ix)
@@ -255,111 +608,21 @@ impl Writable for Matrix3<f32> {
     }
 }
 
-impl Writable for Hermite {
-    fn write_at_cursor(
-        &self,
-        c: reflection::Cursor,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        buffers: &mut HashMap<usize, HashMap<usize, Buffer>>,
-    ) {
-        let pos_cursor = c.navigate_field(0).unwrap();
-        let normal_cursor = c.navigate_field(1).unwrap();
-        self.pos.write_at_cursor(pos_cursor, device, queue, buffers);
-        self.normal
-            .write_at_cursor(normal_cursor, device, queue, buffers);
-    }
-}
-
-impl Writable for Camera {
-    fn write_at_cursor(
-        &self,
-        c: reflection::Cursor,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        buffers: &mut HashMap<usize, HashMap<usize, Buffer>>,
-    ) {
-        let width_cursor = c.navigate_field(0).unwrap();
-        let height_cursor = c.navigate_field(1).unwrap();
-        let frame_cursor = c.navigate_field(2).unwrap();
-        let frame_inv_cursor = c.navigate_field(3).unwrap();
-        let centre_cursor = c.navigate_field(4).unwrap();
-        let yfov_cursor = c.navigate_field(5).unwrap();
-        self.width
-            .write_at_cursor(width_cursor, device, queue, buffers);
-        self.height
-            .write_at_cursor(height_cursor, device, queue, buffers);
-        self.frame
-            .write_at_cursor(frame_cursor, device, queue, buffers);
-        self.frame_inv
-            .write_at_cursor(frame_inv_cursor, device, queue, buffers);
-        self.centre
-            .write_at_cursor(centre_cursor, device, queue, buffers);
-        self.yfov
-            .write_at_cursor(yfov_cursor, device, queue, buffers);
-    }
-}
-
-impl Writable for SurfaceParams {
-    fn write_at_cursor(
-        &self,
-        c: reflection::Cursor,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        buffers: &mut HashMap<usize, HashMap<usize, Buffer>>,
-    ) {
-        let support_cursor = c.navigate_field(0).unwrap();
-        let point_count_cursor = c.navigate_field(1).unwrap();
-        let point_data_cursor = c.navigate_field(2).unwrap();
-        self.support
-            .write_at_cursor(support_cursor, device, queue, buffers);
-        self.point_count
-            .write_at_cursor(point_count_cursor, device, queue, buffers);
-        // let total_bytes_needed = (self.point_count as usize)
-        //     * point_data_cursor
-        //         .type_layout()
-        //         .element_stride(slang::ParameterCategory::Uniform);
-        let total_bytes_needed = (self.point_count as usize)
-            * point_data_cursor
-                .type_layout()
-                .element_type_layout()
-                .stride(slang::ParameterCategory::Uniform);
-        let point_data_buffer = buffers
-            .get_mut(&point_data_cursor.offset().set())
-            .unwrap()
-            .get_mut(&point_data_cursor.offset().slot())
-            .unwrap();
-        if point_data_buffer.size() != total_bytes_needed.try_into().unwrap() {
-            *point_data_buffer = device.create_buffer(&BufferDescriptor {
-                label: None,
-                size: total_bytes_needed.try_into().unwrap(),
-                usage: point_data_buffer.usage(),
-                mapped_at_creation: false,
-            });
-        }
-        for i in 0..self.point_count {
-            let hermite_cursor = point_data_cursor.navigate_index(i as u32).unwrap();
-            self.point_data[i as usize].write_at_cursor(hermite_cursor, device, queue, buffers);
-        }
-    }
-}
-
-impl Writable for GraphicsGlobal {
-    fn write_at_cursor(
-        &self,
-        c: reflection::Cursor,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        buffers: &mut HashMap<usize, HashMap<usize, Buffer>>,
-    ) {
-        let camera_cursor = c.navigate_field(0).unwrap().navigate_child().unwrap();
-        let surface_cursor = c.navigate_field(1).unwrap().navigate_child().unwrap();
-        self.camera
-            .write_at_cursor(camera_cursor, device, queue, buffers);
-        self.surface
-            .write_at_cursor(surface_cursor, device, queue, buffers);
-    }
-}
+// impl Writable for Hermite {
+//     fn write_at_cursor(
+//         &self,
+//         c: reflection::Cursor,
+//         device: &wgpu::Device,
+//         queue: &wgpu::Queue,
+//         binding_resources: &mut BindingResources,
+//     ) {
+//         let pos_cursor = c.navigate_field(0).unwrap();
+//         let normal_cursor = c.navigate_field(1).unwrap();
+//         self.pos.write_at_cursor(pos_cursor, device, queue, buffers);
+//         self.normal
+//             .write_at_cursor(normal_cursor, device, queue, buffers);
+//     }
+// }
 
 pub enum AppState<'a> {
     Uninitialized(),
@@ -374,13 +637,17 @@ pub struct App<'a> {
     device: Device,
     queue: Queue,
     render_pipeline: RenderPipeline,
-    buffers: HashMap<usize, HashMap<usize, Buffer>>,
+    binding_resources: BindingResources,
     bind_group_layouts: HashMap<usize, BindGroupLayout>,
     layout_entries: HashMap<usize, Vec<BindGroupLayoutEntry>>,
     graphics_global: GraphicsGlobal,
     program: slang::ComponentType,
     slang_global_session: slang::GlobalSession,
     slang_session: slang::Session,
+    fixed_time: Instant,
+    mouse_capture_mode: CursorGrabMode,
+    cursor_is_visible: bool,
+    camera_controller: CameraController,
 }
 
 fn circle(n: usize) -> Vec<Hermite> {
@@ -401,11 +668,16 @@ impl<'a> App<'a> {
         let global_type_layout = reflection.global_params_type_layout();
 
         let top_cursor = Cursor::fresh(global_type_layout);
-        self.graphics_global.write_at_cursor(top_cursor, &self.device, &self.queue, &mut self.buffers);
+        self.graphics_global.write_at_cursor(
+            top_cursor,
+            &self.device,
+            &self.queue,
+            &mut self.binding_resources,
+        );
 
         // Make bind groups
         let bind_group_entries =
-            bind_group_entries_from_layout(&self.layout_entries, &self.buffers);
+            bind_group_entries_from_layout(&self.layout_entries, &self.binding_resources);
         let bind_group_labels: HashMap<usize, String> = bind_group_entries
             .iter()
             .map(|(&k, v)| (k, format!("bg{}", k)))
@@ -466,10 +738,71 @@ impl<'a> App<'a> {
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
+            self.graphics_global.camera.0.height = new_size.height as f32;
+            self.graphics_global.camera.0.width = new_size.width as f32;
             self.surface_config.width = new_size.width;
             self.surface_config.height = new_size.height;
             self.surface.configure(&self.device, &self.surface_config);
         }
+    }
+    fn toggle_mouse_capture(&mut self) {
+        let new_mode = match self.mouse_capture_mode {
+            CursorGrabMode::None => CursorGrabMode::Locked,
+            CursorGrabMode::Confined => CursorGrabMode::None,
+            CursorGrabMode::Locked => CursorGrabMode::None,
+        };
+        let fallback_mode = match self.mouse_capture_mode {
+            CursorGrabMode::None => CursorGrabMode::Confined,
+            CursorGrabMode::Confined => CursorGrabMode::None,
+            CursorGrabMode::Locked => CursorGrabMode::None,
+        };
+        let visibility = match new_mode {
+            CursorGrabMode::None => true,
+            CursorGrabMode::Confined => false,
+            CursorGrabMode::Locked => false,
+        };
+        if let Err(_) = self.window.set_cursor_grab(new_mode) {
+            self.window.set_cursor_grab(fallback_mode).unwrap();
+        }
+        self.window.set_cursor_visible(visibility);
+
+        self.mouse_capture_mode = new_mode;
+        self.cursor_is_visible = visibility;
+    }
+    fn window_input(&mut self, event: &WindowEvent) {
+        // probably the camera controller should not have to know what the window event is
+        // we're passing too much in
+        // TODO: refactor this
+        self.camera_controller.process_window_event(event);
+        match event {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => self.toggle_mouse_capture(),
+            _ => {}
+        }
+    }
+    fn device_input(&mut self, event: &DeviceEvent) {
+        match self.mouse_capture_mode {
+            CursorGrabMode::Confined | CursorGrabMode::Locked => {
+                if let DeviceEvent::MouseMotion { delta } = event {
+                    self.camera_controller
+                        .process_mouse_motion(&mut self.graphics_global.camera.0, delta);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn update_logic_state(&mut self, new_time: Instant) {
+        let dt = new_time.duration_since(self.fixed_time);
+        self.camera_controller
+            .update_camera(&mut self.graphics_global.camera.0, dt);
+
+        // Write all deferrable logic (not rendering) changes.
+        // Maybe I should have wrapper logic just to set a bit telling me whether
+        // a change needs to be written?
+        self.fixed_time = new_time;
     }
 }
 
@@ -482,6 +815,8 @@ impl<'a> ApplicationHandler for AppState<'a> {
         match self {
             AppState::Uninitialized() => {}
             AppState::Initialized(app) => {
+                let new_time = Instant::now();
+                app.update_logic_state(new_time);
                 if cause == winit::event::StartCause::Poll {
                     app.window.request_redraw();
                 }
@@ -605,7 +940,6 @@ impl<'a> ApplicationHandler for AppState<'a> {
 
         let layout_entries = base_layout_entries(global_type_layout);
         let buffers = buffers_from_layout(&device, &layout_entries);
-
         println!("{}", shader_bytecode.as_str().unwrap());
 
         // Using Slang-compiled code
@@ -699,16 +1033,40 @@ impl<'a> ApplicationHandler for AppState<'a> {
             yfov: PI / 4.0,
         };
 
-        let point_data= circle(3);
+        let point_data = StructuredBuffer(circle(9));
         let surface_params = SurfaceParams {
             support: 1.0,
-            point_count: point_data.len().try_into().unwrap(),
+            point_count: point_data.0.len().try_into().unwrap(),
             point_data,
         };
 
+        let background = RgbaSkybox::load_from_path(Path::new("textures/bg1")).unwrap();
+        let background_sampler = DummySampler {};
+
         let graphics_global = GraphicsGlobal {
-            camera,
-            surface: surface_params,
+            camera: ConstantBuffer(camera),
+            surface: ConstantBuffer(surface_params),
+            background: ConstantBuffer(background),
+            background_sampler: ConstantBuffer(background_sampler),
+        };
+
+        let fixed_time = Instant::now();
+        let mouse_capture_mode = CursorGrabMode::None;
+        let cursor_is_visible = true;
+        let camera_controller = CameraController {
+            q_state: ElementState::Released,
+            e_state: ElementState::Released,
+            w_state: ElementState::Released,
+            s_state: ElementState::Released,
+            a_state: ElementState::Released,
+            d_state: ElementState::Released,
+        };
+
+        let binding_resources = BindingResources {
+            buffers,
+            textures: HashMap::new(),
+            texture_views: HashMap::new(),
+            samplers: HashMap::new(),
         };
 
         *self = AppState::Initialized(App {
@@ -720,12 +1078,16 @@ impl<'a> ApplicationHandler for AppState<'a> {
             queue,
             render_pipeline,
             bind_group_layouts,
+            binding_resources,
             layout_entries,
-            buffers,
             graphics_global,
             program,
             slang_global_session: global_session,
             slang_session: session,
+            fixed_time,
+            mouse_capture_mode,
+            cursor_is_visible,
+            camera_controller,
         })
     }
 
@@ -744,8 +1106,20 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     Err(e) => eprintln!("{:?}", e),
                 },
                 WindowEvent::Resized(new_size) => app.resize(new_size),
-                _ => (),
+                e => app.window_input(&e),
             },
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        match self {
+            AppState::Uninitialized() => {}
+            AppState::Initialized(app) => app.device_input(&event),
         }
     }
 }

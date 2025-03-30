@@ -10,5 +10,8 @@ winit = "0.30"
 pollster = "0"
 ouroboros = "0"
 cgmath = "0"
+syn = "2"
 bytemuck = "1"
+image = "0"
 slang = { git = "https://github.com/FloatyMonkey/slang-rs.git" }
+proc_macros = {path = "proc_macros"}

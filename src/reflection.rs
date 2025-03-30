@@ -21,7 +21,8 @@ use slang::{
 };
 use wgpu::{
     BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, Buffer,
-    BufferBinding, ShaderStages, TextureViewDimension,
+    BufferBinding, Sampler, ShaderStages, Texture, TextureView, TextureViewDimension,
+    util::DeviceExt,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -61,8 +62,15 @@ pub trait Writable {
         c: Cursor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        buffers: &mut HashMap<usize, HashMap<usize, Buffer>>,
+        binding_resources: &mut BindingResources,
     );
+}
+
+pub struct BindingResources {
+    pub buffers: HashMap<usize, HashMap<usize, Buffer>>,
+    pub texture_views: HashMap<usize, HashMap<usize, TextureView>>,
+    pub textures: HashMap<usize, HashMap<usize, Texture>>,
+    pub samplers: HashMap<usize, HashMap<usize, Sampler>>,
 }
 
 pub fn buffers_from_layout(
@@ -111,10 +119,12 @@ pub fn buffers_from_layout(
     out
 }
 
+// No analogue for textures, we'll make them dynamically
+
 // Dynamic buffers still need to be resized after
 pub fn bind_group_entries_from_layout<'a>(
     layout_entries: &HashMap<usize, Vec<BindGroupLayoutEntry>>,
-    buffers: &'a HashMap<usize, HashMap<usize, Buffer>>,
+    binding_resources: &'a BindingResources,
 ) -> HashMap<usize, Vec<BindGroupEntry<'a>>> {
     layout_entries
         .iter()
@@ -129,7 +139,8 @@ pub fn bind_group_entries_from_layout<'a>(
                                 has_dynamic_offset,
                                 min_binding_size,
                             } => {
-                                let buffer = buffers
+                                let buffer = binding_resources
+                                    .buffers
                                     .get(k)
                                     .unwrap()
                                     .get(&le.binding.try_into().unwrap())
@@ -139,6 +150,28 @@ pub fn bind_group_entries_from_layout<'a>(
                                     offset: 0,
                                     size: None,
                                 })
+                            }
+                            wgpu::BindingType::Texture {
+                                sample_type,
+                                view_dimension,
+                                multisampled,
+                            } => {
+                                let texture_view = binding_resources
+                                    .texture_views
+                                    .get(k)
+                                    .unwrap()
+                                    .get(&le.binding.try_into().unwrap())
+                                    .unwrap();
+                                wgpu::BindingResource::TextureView(texture_view)
+                            }
+                            wgpu::BindingType::Sampler(sbt) => {
+                                let sampler = binding_resources
+                                    .samplers
+                                    .get(k)
+                                    .unwrap()
+                                    .get(&le.binding.try_into().unwrap())
+                                    .unwrap();
+                                wgpu::BindingResource::Sampler(sampler)
                             }
                             _ => unimplemented!(),
                         };
@@ -172,7 +205,18 @@ pub fn layout_entries_wowee(
         let leaf_tl = tl.binding_range_leaf_type_layout(i);
         match tl.binding_range_type(i) {
             slang::BindingType::Sampler => {
-                unimplemented!()
+                if !entries.contains_key(&current_set_index) {
+                    entries.insert(current_set_index, vec![]);
+                    next_set_index += 1;
+                }
+                let entry_vec = entries.get_mut(&current_set_index).unwrap();
+                let binding: u32 = (entry_vec.len()).try_into().unwrap();
+                entry_vec.push(BindGroupLayoutEntry {
+                    binding,
+                    visibility: ShaderStages::all(),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                });
             }
             slang::BindingType::Texture => {
                 if !entries.contains_key(&current_set_index) {
@@ -197,7 +241,7 @@ pub fn layout_entries_wowee(
                     binding,
                     visibility: ShaderStages::all(),
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension,
                         multisampled: false,
                     },
@@ -471,13 +515,16 @@ impl<'a> Cursor<'a> {
                         uniform,
                     },
                 })
-            },
+            }
             TypeKind::Resource => {
                 let element_tl = self.type_layout.element_type_layout();
                 // Lol idk if the set and slot stride make any sense at all
                 let set_stride = 0;
                 let slot_stride = 0;
-                let uniform_stride = self.type_layout.element_type_layout().stride(ParameterCategory::Uniform);
+                let uniform_stride = self
+                    .type_layout
+                    .element_type_layout()
+                    .stride(ParameterCategory::Uniform);
                 let set_accumulator =
                     self.offset.set_accumulator + (buffer_index as usize) * set_stride;
                 let set = if element_tl.kind() == TypeKind::ParameterBlock {
@@ -519,7 +566,7 @@ impl<'a> Cursor<'a> {
                         uniform,
                     },
                 })
-            },
+            }
             _ => None,
         }
     }

@@ -125,6 +125,8 @@ func direct_render_hermite(c: Camera, h: Hermite, pos: float2)->float4 {
 // DATA
 ConstantBuffer<Camera> camera;
 ConstantBuffer<SurfaceParams> surface;
+ConstantBuffer<TextureCube> background;
+ConstantBuffer<SamplerState> background_sampler;
 
 // ENTRY POINTS
 [shader("vertex")]
@@ -150,5 +152,6 @@ float4 fragment(float4 in: SV_Position)
             return color;
         }
     }
-    return float4(0, 0, 0, 1);
+    let ray = fragpos_to_ray(camera, in.xy);
+    return background.Sample(background_sampler, ray.v);
 }
