@@ -25,7 +25,7 @@ struct SituatedPoint : IDifferentiable
     float3 q;
 }
 
-struct SituatedTR3
+struct SituatedTR3 : IDifferentiable
 {
     int region;
     float3 q;
@@ -38,6 +38,7 @@ struct SurfaceParams: IDifferentiable {
     StructuredBuffer<Hermite> point_data;
 }
 
+// Only allows x >= 0.
 [BackwardDifferentiable]
 func wendland(no_diff h: float, x: float) -> float {
     if (x > h) {
@@ -175,6 +176,21 @@ func christoffel(no_diff sp: SurfaceParams, no_diff outer_length: float, x: Situ
     return out;
 }
 
+// The surface energy is 1-Lipschitz. To see this, consider
+// that lc.normal is an average of normals, so it's at most unit length,
+// and you'd get the steepest increase if they were all angled parallel
+// with x-lc.pos. x-lc.pos meanwhile is 1-Lipschitz itself, since it gets
+// the worst case by lc.pos staying still while x goes away. (lc.pos could
+// trail behind x at any speed, so worst case is it stays still - it can't
+// recede away from x because our kernel is not deranged.)
+// Accordingly, we have that the energy at a point is bounded above by
+// its distance from the zero set.
+// We also have that it's *consistent* to say that the energy of a distant
+// point is equal to its distance from the hyperplane supported at its nearest point.
+// To get a safe distance to step our ray, we want basically
+// D(x+delta) >= outer_length,
+// and we have D(x+delta)>=E(x+delta)>=kernel radius - norm(delta) >= outer_length,
+// so long as delta is chosen with norm(delta) <= kernel_radius - outer_length.
 [Differentiable]
 func surface_energy(no_diff sp: SurfaceParams, x: float3)-> float {
     let lc = local_centroid(sp, x);
@@ -239,8 +255,48 @@ func accel_here(no_diff sp: SurfaceParams, no_diff outer_length: float, x: Situa
     return out;
 }
 
+func one_outer_step(no_diff sp: SurfaceParams, no_diff outer_length: float, x: SituatedTR3)->SituatedTR3 {
+    var energy = surface_energy(sp, x.q);
+    if (!isfinite(energy)) {
+        energy = sp.support; // kernel radius
+    }
+    let delta = energy - outer_length;
+    if (delta <= 0.25 * outer_length) {
+        return x;
+    }
+    return SituatedTR3(x.region, x.q + delta * x.v, x.v);
+}
+
+func phase_vel(no_diff sp: SurfaceParams, no_diff outer_length: float, x: SituatedTR3)->SituatedTR3.Differential {
+    return SituatedTR3.Differential(x.v, accel_here(sp, outer_length, x));
+}
+
+// RK4
+func one_throat_step(no_diff sp: SurfaceParams, no_diff outer_length: float, dt: float, x: SituatedTR3)->SituatedTR3 {
+    let k1 = phase_vel(sp, outer_length, x);
+    let x1 = SituatedTR3(x.region, x.q + (dt / 2) * k1.q, x.v + (dt / 2) * k1.v);
+    let k2 = phase_vel(sp, outer_length, x1);
+    let x2 = SituatedTR3(x.region, x.q + (dt / 2) * k2.q, x.v + (dt / 2) * k2.v);
+    let k3 = phase_vel(sp, outer_length, x2);
+    let x3 = SituatedTR3(x.region, x.q + dt * k2.q, x.v + dt * k2.v);
+    let k4 = phase_vel(sp, outer_length, x3);
+    return SituatedTR3(x.region, x.q + (dt / 6) * (k1.q + 2 * k2.q + 2 * k3.q + k4.q), x.v + (dt / 6) * (k1.v + 2 * k2.v + 2 * k3.v + k4.v));
+}
+
 // RK4
 // No early exit or pathology detection right now
+// It's not clear how we could implement this nicely at the moment.
+// We don't know what the basin of attraction of surface-projection
+// looks like, so we don't know when it's safe to take a projection.
+// But the point-projection length is what determines whether we've
+// entered the throat.
+// One alternative is to use a constant surface energy rather than outer_length,
+// but surface energy has problems too, due to numerical instability and/or compact
+// support of the wendland kernel. We want to use the surface energy only when we're close
+// enough that we're guaranteed to get a nice value.
+// So we need to gauge our distance to the surface.
+// We could do some precomputing, or axis-aligned bounding box shenanigans, in order to
+// facilitate this.
 func horse_steppin(no_diff sp: SurfaceParams, no_diff outer_length: float, kiter: int, dt: float, x: SituatedTR3)->SituatedTR3 {
 
 }
