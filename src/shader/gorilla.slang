@@ -32,6 +32,10 @@ struct SituatedTR3 : IDifferentiable
     float3 v;
 }
 
+func ident_repr(x: SituatedTR3, y: SituatedTR3)->bool {
+    return x.region == y.region && all(x.q == y.q && x.v == y.v);
+}
+
 struct SurfaceParams: IDifferentiable {
     float support;
     int point_count;
@@ -83,6 +87,29 @@ func metric(no_diff sp: SurfaceParams, no_diff outer_length: float, x: SituatedP
     let jacobian = transition_jacobian(sp, outer_length, x.q);
     let there_metric_pullback = transpose(jacobian) * jacobian; // Would have metric in the middle if it weren't the identity
     return here_fiber_param * here_metric + there_fiber_param * there_metric_pullback; 
+}
+
+[BackwardDerivative(bwd_diff_of_distant_energy)]
+func distant_energy(no_diff sp: SurfaceParams, x: float3) -> float {
+    let mindist = 1.#INF;
+    var outenergy = 0.0;
+    for (int i = 0; i < sp.point_count; ++i) {
+        let dist = length(x-sp.point_data[i].pos);
+        if (dist < mindist) {
+            outenergy = dot(x-sp.point_data[i].pos, sp.point_data[i].normal);
+        }
+    }
+    return outenergy;
+}
+
+func bwd_diff_of_distant_energy(no_diff sp: SurfaceParams, inout x: DifferentialPair<float3>, d: float) {
+    let mindist = 1.#INF;
+    for (int i = 0; i < sp.point_count; ++i) {
+        let dist = length(x.v - sp.point_data[i].pos);
+        if (dist < mindist) {
+            x = diffPair(x.v, sp.point_data[i].normal * d);
+        }
+    }
 }
 
 // 0 <= lo <= hi < hs.getCount()
@@ -168,7 +195,7 @@ func christoffel(no_diff sp: SurfaceParams, no_diff outer_length: float, x: Situ
         for (int i = 0; i < 3; ++i) {
             for (int j = 0; j < 3; ++j) {
                 for (int m = 0; m < 3; ++m) {
-                    0.5 * inverse_metric[k][m] * (cs[j].d[m][i] + cs[i].d[m][j] - cs[m].d[i][j]);
+                    out[k][i][j] = 0.5 * inverse_metric[k][m] * (cs[j].d[m][i] + cs[i].d[m][j] - cs[m].d[i][j]);
                 }
             }
         }
@@ -189,12 +216,28 @@ func christoffel(no_diff sp: SurfaceParams, no_diff outer_length: float, x: Situ
 // point is equal to its distance from the hyperplane supported at its nearest point.
 // To get a safe distance to step our ray, we want basically
 // D(x+delta) >= outer_length,
-// and we have D(x+delta)>=E(x+delta)>=kernel radius - norm(delta) >= outer_length,
-// so long as delta is chosen with norm(delta) <= kernel_radius - outer_length.
+// and we have D(x+delta)>=E(x+delta)>=E(x) - norm(delta) >= outer_length,
+// so long as delta is chosen with norm(delta) <= E(x) - outer_length.
+// Unfortunately we don't have a bound like E(x) >= kernel_radius, since
+// you can absolutely have E(x) = 0 for very distant points x (imagine points in a circle-
+// this generates an infinite cylinder). However,
+// I think the really pathological stuff can happen only when the intersection
+// of negative half-spaces induced by our points is noncompact.
+// I guess we have no choice but to compute the fallback energy correctly.
 [Differentiable]
-func surface_energy(no_diff sp: SurfaceParams, x: float3)-> float {
+func raw_surface_energy(no_diff sp: SurfaceParams, x: float3)-> float {
     let lc = local_centroid(sp, x);
     return dot(lc.normal, x - lc.pos);
+}
+
+[Differentiable]
+func surface_energy(no_diff sp: SurfaceParams, x: float3) -> float {
+    let se = raw_surface_energy(sp, x);
+    if (isfinite(se)) {
+        return se; 
+    } else {
+        return distant_energy(sp, x);
+    }
 }
 
 // Main idea: we're using Newton's method for improving lambda.
@@ -255,13 +298,11 @@ func accel_here(no_diff sp: SurfaceParams, no_diff outer_length: float, x: Situa
     return out;
 }
 
+// We need a single criterion for the outer-inner transition
 func one_outer_step(no_diff sp: SurfaceParams, no_diff outer_length: float, x: SituatedTR3)->SituatedTR3 {
     var energy = surface_energy(sp, x.q);
-    if (!isfinite(energy)) {
-        energy = sp.support; // kernel radius
-    }
     let delta = energy - outer_length;
-    if (delta <= 0.25 * outer_length) {
+    if (delta <= 0.2 * outer_length) {
         return x;
     }
     return SituatedTR3(x.region, x.q + delta * x.v, x.v);
@@ -298,11 +339,33 @@ func one_throat_step(no_diff sp: SurfaceParams, no_diff outer_length: float, dt:
 // We could do some precomputing, or axis-aligned bounding box shenanigans, in order to
 // facilitate this.
 func horse_steppin(no_diff sp: SurfaceParams, no_diff outer_length: float, kiter: int, dt: float, x: SituatedTR3)->SituatedTR3 {
-
+    var prevx = x;
+    var curx = x;
+    bool in_ambient = true; // Safer default option but maybe still needs judgment
+    for (int i = 0; i < kiter; ++i) {
+        prevx = curx;
+        if (in_ambient) {
+            curx = one_outer_step(sp, outer_length, curx);
+            in_ambient = !ident_repr(prevx, curx);
+        } else {
+            curx = one_throat_step(sp, outer_length, dt, curx);
+            let bd = base_and_delta(sp, curx.q);
+            if (length(bd.v) < outer_length/3) {
+                curx = transition_tv(sp, outer_length, curx);
+            } else if (length(bd.v) >= outer_length) {
+                let energy = surface_energy(sp, curx.q);
+                let delta = energy - outer_length;
+                if (delta >= 0.3 * outer_length) {
+                    in_ambient = true;
+                }
+            }
+        }
+    }
+    return curx;
 }
 
 func fragpos_to_ray(camera: Camera, pos: float2)->TR3 {
-    let ray_coords = normalize(float3(
+    let ray_coords = normalize(float3( // Note the normalization - if camera frame is orthonormal, ray will be also
         (pos.x / camera.width - 0.5) * (camera.width / camera.height),
         pos.y / camera.height - 0.5,
         0.5 * rcp(tan(camera.yfov / 2.0))
@@ -389,3 +452,20 @@ float4 fragment(float4 in: SV_Position)
     let ray = fragpos_to_ray(camera, in.xy);
     return background.Sample(background_sampler, ray.v);
 }
+
+// Notes:
+// For nice behavior, we want the whole throat region to lie inside the
+// near_energy region. (Reason why is that the far-energy part is not C1.)
+// The near energy region is B(point cloud, support),
+// i.e. the support-thickening of the point cloud. It's noteworthy that the zero-energy
+// surface can be unbounded, so no tuning of support and outer_length alone can
+// ensure that this holds.
+// At a minimum, this requires us to ensure that the zero-surface lies inside
+// the support-thickening of the point cloud. So long as the zero-surface is compact,
+// there is a choice of support for which this will hold, but that may ruin topological
+// features of the surface.
+// Suppose instead that the point cloud is very dense on a compact surface.
+// Then the zero set tracks it closely, and the support-thickening of the point
+// cloud contains (1-epsilon)support energy levels completely for small values of support,
+// or something like that. Should think this through more carefully, to see
+// how dense the point cloud really needs to be.
