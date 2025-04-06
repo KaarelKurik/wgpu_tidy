@@ -660,6 +660,22 @@ fn circle(n: usize) -> Vec<Hermite> {
         .collect()
 }
 
+// m >= 2
+fn sphere(m: usize, n: usize) -> Vec<Hermite> {
+    let mut out = Vec::with_capacity((m-2)*n + 2);
+    out.push(Hermite{pos: Vector3::unit_z(), normal: Vector3::unit_z()});
+    for i in 1..(m-1) {
+        let psi = (i as f32/(m-1) as f32) * PI;
+        for j in 0..n {
+            let phi = (j as f32/n as f32) * TAU;
+            let v = Vector3::new(phi.cos()*psi.sin(), phi.sin()*psi.sin(), psi.cos());
+            out.push(Hermite { pos: v, normal: v });
+        }
+    }
+    out.push(Hermite { pos: -Vector3::unit_z(), normal: -Vector3::unit_z() });
+    out
+}
+
 impl<'a> App<'a> {
     fn render(&mut self) -> Result<(), SurfaceError> {
         // Global graphics object?
@@ -1033,7 +1049,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
             yfov: PI / 3.0,
         };
 
-        let point_data = StructuredBuffer(circle(9));
+        let point_data = StructuredBuffer(sphere(10, 10));
         let surface_params = SurfaceParams {
             support: 1.0,
             point_count: point_data.0.len().try_into().unwrap(),

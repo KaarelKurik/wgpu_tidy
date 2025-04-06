@@ -299,6 +299,8 @@ func accel_here(no_diff sp: SurfaceParams, no_diff outer_length: float, x: Situa
 }
 
 // We need a single criterion for the outer-inner transition
+// Assumes x.v is normalized
+// Works based on the assumption that surface_energy is 1-Lipschitz
 func one_outer_step(no_diff sp: SurfaceParams, no_diff outer_length: float, x: SituatedTR3)->SituatedTR3 {
     var energy = surface_energy(sp, x.q);
     let delta = energy - outer_length;
@@ -404,6 +406,9 @@ func direct_render_hermite(c: Camera, h: Hermite, pos: float2)->float4 {
     let central_pos = float2(pos.x - c.width / 2, pos.y - c.height / 2);
     let inverse_focal_length = (2 * tan(c.yfov / 2)) / c.height; // also pixel width
     let rescaled_pos = central_pos * inverse_focal_length;
+    if (dot(sa - sb, sa - sb) == 0) {
+        return float4(0);
+    }
     let lambda = dot(sb - sa, sb - rescaled_pos) / dot(sb - sa, sb - sa);
     if (lambda < 0 || lambda > 1) {
         return float4(0);
@@ -469,3 +474,19 @@ float4 fragment(float4 in: SV_Position)
 // cloud contains (1-epsilon)support energy levels completely for small values of support,
 // or something like that. Should think this through more carefully, to see
 // how dense the point cloud really needs to be.
+
+// Order should go feature size > kernel size > polygon size.
+// Point cloud should be equal-area sampled to avoid deficiencies of translation
+// like you might get if you took a sphere and sampled one half very densely and the other half
+// barely at all.
+
+// Here's one construction for a guaranteed "outside". Take the kernel size.
+// Consider all subsets of points in the cloud that could fit into the kernel centered
+// somewhere.
+// Take the intersection of their positive halfspaces. Subtract kernel-sized balls around
+// every remaining point from this intersection of halfspaces. This is a guaranteed outside.
+
+// So remember that the "convergence basin for projection" and "near energy region"
+// are possibly distinct, and we want to make sure that the throat is contained in their
+// intersection. It's realistic, I think, to conjecture that the near energy region
+// is contained in the convergence basin, for reasonable support and pointcloud choices.
