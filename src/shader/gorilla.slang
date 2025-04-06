@@ -424,7 +424,8 @@ func direct_render_hermite(c: Camera, h: Hermite, pos: float2)->float4 {
 // DATA
 ConstantBuffer<Camera> camera;
 ConstantBuffer<SurfaceParams> surface;
-ConstantBuffer<TextureCube> background;
+ConstantBuffer<TextureCube> background0;
+// ConstantBuffer<TextureCube> background1;
 ConstantBuffer<SamplerState> background_sampler;
 
 // ENTRY POINTS
@@ -447,15 +448,14 @@ float4 vertex(uint ix: SV_VertexID)
 float4 fragment(float4 in: SV_Position)
     : SV_Target
 {
-    for (int i = 0; i < surface.point_count; ++i) {
-        let h = surface.point_data[i];
-        let color = direct_render_hermite(camera, h, in.xy);
-        if (color.w > 0.5) {
-            return color;
-        }
-    }
     let ray = fragpos_to_ray(camera, in.xy);
-    return background.Sample(background_sampler, ray.v);
+    let situated_ray = SituatedTR3(0, ray.q, ray.v);
+    let result_ray = horse_steppin(surface, 0.1, 0, 0.03, situated_ray);
+    if (result_ray.region == 0) {
+        return background0.Sample(background_sampler, ray.v);
+    } else {
+        return background0.Sample(background_sampler, ray.v);
+    }
 }
 
 // Notes:

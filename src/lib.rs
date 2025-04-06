@@ -70,6 +70,7 @@ impl<T: ShaderType + WriteInto> GammaT for Gamma<T> {
 
 // Has to have equal resolution on all faces
 struct RgbaSkybox {
+    written_already: bool, // hack
     px: RgbaImage,
     nx: RgbaImage,
     py: RgbaImage,
@@ -138,6 +139,7 @@ impl RgbaSkybox {
                     image::imageops::flip_vertical_in_place(&mut im);
                     Ok(im)});
         Ok(RgbaSkybox {
+            written_already: false,
             px: px?,
             nx: nx?,
             py: py?,
@@ -156,6 +158,7 @@ impl Writable for RgbaSkybox {
         queue: &wgpu::Queue,
         binding_resources: &mut BindingResources,
     ) {
+        if self.written_already {return;}
         let textures = &mut binding_resources.textures;
         let texture_views = &mut binding_resources.texture_views;
         let set_index = c.offset().set();
@@ -435,14 +438,34 @@ struct Hermite {
     normal: Vector3<f32>,
 }
 
-#[derive(Writable)]
 struct SurfaceParams {
     support: f32,
     point_count: i32,
     point_data: StructuredBuffer<Hermite>,
+    written_already: bool // hack
 }
 
-struct DummySampler {}
+impl Writable for SurfaceParams {
+    fn write_at_cursor(
+        &self,
+        c: Cursor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        binding_resources: &mut BindingResources,
+    ) {
+        if self.written_already {return;}
+        let support_cursor = c.navigate_field(0).unwrap();
+        let point_count_cursor = c.navigate_field(1).unwrap();
+        let point_data_cursor = c.navigate_field(2).unwrap();
+        self.support.write_at_cursor(support_cursor, device, queue, binding_resources);
+        self.point_count.write_at_cursor(point_count_cursor, device, queue, binding_resources);
+        self.point_data.write_at_cursor(point_data_cursor, device, queue, binding_resources);
+    }
+}
+
+struct DummySampler {
+    written_already: bool // hack
+}
 
 impl Writable for DummySampler {
     fn write_at_cursor(
@@ -452,6 +475,7 @@ impl Writable for DummySampler {
         queue: &wgpu::Queue,
         binding_resources: &mut BindingResources,
     ) {
+        if self.written_already {return;}
         let set_index = c.offset().set();
         let slot_index = c.offset().slot();
         if !binding_resources.samplers.contains_key(&set_index) {
@@ -471,7 +495,8 @@ impl Writable for DummySampler {
 struct GraphicsGlobal {
     camera: ConstantBuffer<Camera>,
     surface: ConstantBuffer<SurfaceParams>,
-    background: ConstantBuffer<RgbaSkybox>,
+    background0: ConstantBuffer<RgbaSkybox>,
+    // background1: ConstantBuffer<RgbaSkybox>,
     background_sampler: ConstantBuffer<DummySampler>,
 }
 
@@ -690,6 +715,10 @@ impl<'a> App<'a> {
             &self.queue,
             &mut self.binding_resources,
         );
+        self.graphics_global.surface.0.written_already = true;
+        self.graphics_global.background0.0.written_already = true;
+        // self.graphics_global.background1.0.written_already = true;
+        self.graphics_global.background_sampler.0.written_already = true;
 
         // Make bind groups
         let bind_group_entries =
@@ -1049,20 +1078,23 @@ impl<'a> ApplicationHandler for AppState<'a> {
             yfov: PI / 3.0,
         };
 
-        let point_data = StructuredBuffer(sphere(10, 10));
+        let point_data = StructuredBuffer(sphere(20, 20));
         let surface_params = SurfaceParams {
-            support: 1.0,
+            support: 0.2,
             point_count: point_data.0.len().try_into().unwrap(),
             point_data,
+            written_already: false,
         };
 
-        let background = RgbaSkybox::load_from_path(Path::new("textures/bg1")).unwrap();
-        let background_sampler = DummySampler {};
+        let background0 = RgbaSkybox::load_from_path(Path::new("textures/bg1")).unwrap();
+        let background1 = RgbaSkybox::load_from_path(Path::new("textures/bg_debug")).unwrap();
+        let background_sampler = DummySampler {written_already:false};
 
         let graphics_global = GraphicsGlobal {
             camera: ConstantBuffer(camera),
             surface: ConstantBuffer(surface_params),
-            background: ConstantBuffer(background),
+            background0: ConstantBuffer(background0),
+            // background1: ConstantBuffer(background1),
             background_sampler: ConstantBuffer(background_sampler),
         };
 
