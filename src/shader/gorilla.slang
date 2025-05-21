@@ -176,7 +176,7 @@ func adjugate(x: float3x3)->float3x3 {
 func matrix_inverse(x: float3x3)->float3x3 {
     let adj = adjugate(x);
     let dm = mul(x, adj);
-    return adj / dm[0][0];
+    return adj * rcp(dm[0][0]);
 }
 
 func christoffel(no_diff sp: SurfaceParams, no_diff outer_length: float, x: SituatedPoint)->float3x3[3] {
@@ -230,7 +230,7 @@ func raw_surface_energy(no_diff sp: SurfaceParams, x: float3)-> float {
     return dot(lc.normal, x - lc.pos);
 }
 
-[Differentiable]
+[ForwardDifferentiable]
 func surface_energy(no_diff sp: SurfaceParams, x: float3) -> float {
     let se = raw_surface_energy(sp, x);
     if (isfinite(se)) {
@@ -238,6 +238,15 @@ func surface_energy(no_diff sp: SurfaceParams, x: float3) -> float {
     } else {
         return distant_energy(sp, x);
     }
+}
+
+// Hack to overcome the impossibility of fwd_diff . fwd_diff . bwd_diff composition
+[ForwardDifferentiable]
+func surface_energy_gradient(no_diff sp: SurfaceParams, x: float3)->float3 {
+    let dx = fwd_diff(surface_energy)(sp, diffPair(x, float3(1, 0, 0)));
+    let dy = fwd_diff(surface_energy)(sp, diffPair(x, float3(0, 1, 0)));
+    let dz = fwd_diff(surface_energy)(sp, diffPair(x, float3(0, 0, 1)));
+    return float3(dx.d, dy.d, dz.d);
 }
 
 // Main idea: we're using Newton's method for improving lambda.
@@ -249,15 +258,16 @@ func surface_energy(no_diff sp: SurfaceParams, x: float3) -> float {
 func project_onto_surface(no_diff sp: SurfaceParams, x: float3)->float3 {
     let KSTEPS = 10;
     var lambda : float = 0;
+    var base : float3 = x;
+    var grad : float3 = surface_energy_gradient(sp, base);
     var yPair : DifferentialPair<float3> = diffPair(x, 0);
-    bwd_diff(surface_energy)(sp, yPair, 1.0);
     // Invariant: yPair.v approx to basepoint, yPair.d approx to grad f at basepoint
     // x - lambda * yPair.d approx basepoint
     [ForceUnroll]
     for (int k = 0; k < KSTEPS; ++k) {
-        yPair = diffPair(x - lambda * yPair.d, yPair.d);
-        bwd_diff(surface_energy)(sp, yPair, 1.0);
-        lambda += surface_energy(sp, yPair.v)/dot(yPair.d, yPair.d);
+        base = x - lambda * grad;
+        grad = surface_energy_gradient(sp, base);
+        lambda += surface_energy(sp, base)/dot(grad, grad);
     }
     return yPair.v;
 }
@@ -310,8 +320,8 @@ func one_outer_step(no_diff sp: SurfaceParams, no_diff outer_length: float, x: S
     return SituatedTR3(x.region, x.q + delta * x.v, x.v);
 }
 
-func phase_vel(no_diff sp: SurfaceParams, no_diff outer_length: float, x: SituatedTR3)->SituatedTR3.Differential {
-    return SituatedTR3.Differential(x.v, accel_here(sp, outer_length, x));
+func phase_vel(no_diff sp: SurfaceParams, no_diff outer_length: float, x: SituatedTR3)->SituatedTR3 {
+    return SituatedTR3(x.region, x.v, accel_here(sp, outer_length, x));
 }
 
 // RK4
@@ -350,6 +360,7 @@ func horse_steppin(no_diff sp: SurfaceParams, no_diff outer_length: float, kiter
             curx = one_outer_step(sp, outer_length, curx);
             in_ambient = !ident_repr(prevx, curx);
         } else {
+            return SituatedTR3(1, float3(1.0), float3(1.0));
             curx = one_throat_step(sp, outer_length, dt, curx);
             let bd = base_and_delta(sp, curx.q);
             if (length(bd.v) < outer_length/3) {
@@ -450,12 +461,13 @@ float4 fragment(float4 in: SV_Position)
 {
     let ray = fragpos_to_ray(camera, in.xy);
     let situated_ray = SituatedTR3(0, ray.q, ray.v);
-    let result_ray = horse_steppin(surface, 0.1, 0, 0.03, situated_ray);
-    if (result_ray.region == 0) {
-        return background0.Sample(background_sampler, ray.v);
-    } else {
-        return background0.Sample(background_sampler, ray.v);
-    }
+    let result_ray = horse_steppin(surface, 0.1, 300, 0.03, situated_ray);
+    return float4((result_ray.q.z + 5.0) / 10.0, 0, 0, 1);
+    // if (result_ray.region == 0) {
+    //     return background0.Sample(background_sampler, result_ray.v);
+    // } else {
+    //     return float4(0);
+    // }
 }
 
 // Notes:

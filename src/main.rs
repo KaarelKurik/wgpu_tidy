@@ -1,16 +1,49 @@
-use std::{collections::HashMap, io::Write};
+use std::{collections::HashMap, io::Write, sync::Arc};
 
 use slang::Downcast;
+use wgpu::include_wgsl;
 use wgpu_tidy::{reflection::{layout_entries_wowee, walk_him_down, Cursor}, AppState};
 use winit::event_loop::{self, EventLoop};
 
+fn just_validate_wgsl() {
+
+
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN | wgpu::Backends::METAL,
+        ..Default::default()
+    });
+
+    let adapter_future = instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+    });
+    let adapter = pollster::block_on(adapter_future).unwrap();
+
+    let device_future = adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("device"),
+            required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+            required_limits: wgpu::Limits {
+                max_bind_groups: 5,
+                ..Default::default()
+            },
+            memory_hints: wgpu::MemoryHints::default(),
+        },
+        None,
+    );
+    let (device, queue) = pollster::block_on(device_future).unwrap();
+    let shader_module = device.create_shader_module(include_wgsl!("shader/testy5.wgsl"));
+}
+
 fn main() {
-    let event_loop = EventLoop::new().unwrap();
+    just_validate_wgsl();
+    // let event_loop = EventLoop::new().unwrap();
 
-    event_loop.set_control_flow(event_loop::ControlFlow::Poll);
+    // event_loop.set_control_flow(event_loop::ControlFlow::Poll);
 
-    let mut app_state = AppState::Uninitialized();
-    event_loop.run_app(&mut app_state).unwrap();
+    // let mut app_state = AppState::Uninitialized();
+    // event_loop.run_app(&mut app_state).unwrap();
 
     // let global_session = slang::GlobalSession::new().unwrap();
     // let search_path = std::ffi::CString::new("src/shader").unwrap();
